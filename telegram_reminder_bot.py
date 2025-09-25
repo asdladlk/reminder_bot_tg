@@ -9,6 +9,7 @@ import schedule
 import time
 from threading import Thread
 import json
+import pytz
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -23,9 +24,51 @@ logger = logging.getLogger(__name__)
 class ReminderBot:
     def __init__(self, token: str):
         self.token = token
-        # Для облачного развертывания используем временную папку
-        self.db_path = os.path.join(os.getcwd(), "reminders.db")
+        self.db_path = "reminders.db"
         self.init_database()
+    
+    def get_user_timezone(self, user_id: int) -> str:
+        """Получить часовой пояс пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT timezone FROM user_settings 
+            WHERE user_id = ?
+        ''', (user_id,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        # По умолчанию возвращаем московское время
+        return result[0] if result else 'Europe/Moscow'
+    
+    def set_user_timezone(self, user_id: int, timezone: str):
+        """Установить часовой пояс пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                timezone TEXT DEFAULT 'Europe/Moscow',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO user_settings (user_id, timezone)
+            VALUES (?, ?)
+        ''', (user_id, timezone))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_local_time(self, user_id: int) -> datetime:
+        """Получить локальное время пользователя"""
+        user_tz = self.get_user_timezone(user_id)
+        tz = pytz.timezone(user_tz)
+        return datetime.now(tz)
         
     def init_database(self):
         """Инициализация базы данных"""
@@ -345,6 +388,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /list - показать все напоминания
 /help - помощь
 /delete [номер] - удалить напоминание
+/timezone - настроить часовой пояс
 
 Начните с создания первого напоминания! 🚀
     """
@@ -370,6 +414,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - начать работу с ботом
 /list - показать все ваши напоминания
 /delete [номер] - удалить напоминание по номеру
+/timezone - настроить часовой пояс
 /help - показать эту справку
 
 **Типы напоминаний:**
@@ -426,6 +471,45 @@ async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Номер напоминания должен быть числом.")
 
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /timezone"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        current_tz = bot.get_user_timezone(user_id)
+        local_time = bot.get_local_time(user_id)
+        
+        text = f"🕐 **Ваш часовой пояс:** {current_tz}\n"
+        text += f"🕐 **Текущее время:** {local_time.strftime('%H:%M:%S %d.%m.%Y')}\n\n"
+        text += "**Доступные часовые пояса:**\n"
+        text += "• `/timezone Europe/Moscow` - Москва\n"
+        text += "• `/timezone Europe/Kiev` - Киев\n"
+        text += "• `/timezone Europe/Minsk` - Минск\n"
+        text += "• `/timezone Europe/London` - Лондон\n"
+        text += "• `/timezone America/New_York` - Нью-Йорк\n"
+        text += "• `/timezone Asia/Tokyo` - Токио\n"
+        text += "• `/timezone Asia/Shanghai` - Пекин\n"
+        text += "• `/timezone Australia/Sydney` - Сидней\n\n"
+        text += "**Пример:** `/timezone Europe/Moscow`"
+        
+        await update.message.reply_text(text)
+        return
+    
+    timezone = context.args[0]
+    
+    # Проверяем, что часовой пояс существует
+    try:
+        pytz.timezone(timezone)
+        bot.set_user_timezone(user_id, timezone)
+        local_time = bot.get_local_time(user_id)
+        
+        text = f"✅ Часовой пояс установлен: {timezone}\n"
+        text += f"🕐 Текущее время: {local_time.strftime('%H:%M:%S %d.%m.%Y')}"
+        
+        await update.message.reply_text(text)
+    except pytz.exceptions.UnknownTimeZoneError:
+        await update.message.reply_text("❌ Неизвестный часовой пояс. Используйте команду `/timezone` для просмотра доступных вариантов.")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик обычных сообщений"""
     user_id = update.effective_user.id
@@ -448,9 +532,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 r'\s+завтра\s+в\s+\d{1,2}:\d{2}',
                 r'\s+каждый\s+день\s+в\s+\d{1,2}:\d{2}',
                 r'\s+\d+\s+раз\s+в\s+(день|неделю)',
-                r'\s+по\s+(будням|выходным)\s+в\s+\d{1,2}:\d{2}',
-                r'\s+по\s+(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс)\s+в\s+\d{1,2}:\d{2}',
-                r'\s+каждый\s+(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс)\s+в\s+\d{1,2}:\d{2}'
+                r'\s+по\s+(будням|выходным)\s+в\s+\d{1,2}:\d{2}'
             ]:
                 text_without_time = re.sub(pattern, '', text_without_time, flags=re.IGNORECASE)
             
@@ -517,12 +599,16 @@ class SchedulerManager:
         ''')
         
         reminders = cursor.fetchall()
-        current_time = datetime.now()
         
         for reminder in reminders:
             reminder_id, user_id, message, reminder_time, frequency, last_sent = reminder
             
             try:
+                # Получаем локальное время пользователя
+                user_tz = self.bot_instance.get_user_timezone(user_id)
+                tz = pytz.timezone(user_tz)
+                current_time = datetime.now(tz)
+                
                 should_send = self._should_send_reminder(reminder_time, frequency, last_sent, current_time, user_id)
                 logger.info(f"Проверка напоминания {reminder_id}: время={reminder_time}, частота={frequency}, последняя_отправка={last_sent}, отправить={should_send}")
                 
@@ -731,6 +817,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("list", list_reminders))
     application.add_handler(CommandHandler("delete", delete_reminder))
+    application.add_handler(CommandHandler("timezone", timezone_command))
     
     # Добавляем обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -742,6 +829,7 @@ def main():
     # Запускаем бота
     print("🤖 Бот запущен! Нажмите Ctrl+C для остановки.")
     print("📝 Токен получен из переменных окружения")
+    print("🌍 Поддержка часовых поясов включена")
     application.run_polling()
 
 if __name__ == '__main__':
