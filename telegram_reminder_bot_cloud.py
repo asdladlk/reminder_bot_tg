@@ -1,0 +1,748 @@
+import asyncio
+import sqlite3
+import logging
+import os
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+import re
+import schedule
+import time
+from threading import Thread
+import json
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+class ReminderBot:
+    def __init__(self, token: str):
+        self.token = token
+        # Для облачного развертывания используем временную папку
+        self.db_path = os.path.join(os.getcwd(), "reminders.db")
+        self.init_database()
+        
+    def init_database(self):
+        """Инициализация базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                reminder_time TEXT NOT NULL,
+                frequency TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_sent TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def add_reminder(self, user_id: int, message: str, reminder_time: str, frequency: str) -> int:
+        """Добавить новое напоминание"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO reminders (user_id, message, reminder_time, frequency)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, message, reminder_time, frequency))
+        
+        reminder_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        return reminder_id
+    
+    def get_user_reminders(self, user_id: int) -> List[Dict]:
+        """Получить все напоминания пользователя"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, message, reminder_time, frequency, is_active, created_at
+            FROM reminders 
+            WHERE user_id = ? AND is_active = 1
+            ORDER BY created_at DESC
+        ''', (user_id,))
+        
+        reminders = []
+        for row in cursor.fetchall():
+            reminders.append({
+                'id': row[0],
+                'message': row[1],
+                'reminder_time': row[2],
+                'frequency': row[3],
+                'is_active': row[4],
+                'created_at': row[5]
+            })
+        
+        conn.close()
+        return reminders
+    
+    def delete_reminder(self, reminder_id: int, user_id: int) -> bool:
+        """Удалить напоминание"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM reminders 
+            WHERE id = ? AND user_id = ?
+        ''', (reminder_id, user_id))
+        
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        
+        return deleted
+    
+    def parse_time_input(self, time_str: str) -> Optional[Dict]:
+        """Парсинг времени и периодичности из пользовательского ввода"""
+        time_str = time_str.strip().lower()
+        
+        # Паттерны для разового напоминания
+        once_patterns = [
+            r'через (\d+) (минут|час|часа|часов|день|дня|дней)',
+            r'в (\d{1,2}):(\d{2})',
+            r'завтра в (\d{1,2}):(\d{2})',
+            r'(\d{1,2})\.(\d{1,2})\.(\d{4}) в (\d{1,2}):(\d{2})'
+        ]
+        
+        # Паттерны для периодических напоминаний
+        periodic_patterns = [
+            r'каждый день в (\d{1,2}):(\d{2})',
+            r'(\d+) раз в день',
+            r'(\d+) раз в неделю в (\d{1,2}):(\d{2})',
+            r'по будням в (\d{1,2}):(\d{2})',
+            r'по выходным в (\d{1,2}):(\d{2})',
+            r'по (понедельник|вторник|среда|четверг|пятница|суббота|воскресенье) в (\d{1,2}):(\d{2})',
+            r'по (пн|вт|ср|чт|пт|сб|вс) в (\d{1,2}):(\d{2})',
+            r'каждый (понедельник|вторник|среда|четверг|пятница|суббота|воскресенье) в (\d{1,2}):(\d{2})',
+            r'каждый (пн|вт|ср|чт|пт|сб|вс) в (\d{1,2}):(\d{2})'
+        ]
+        
+        # Проверяем разовые напоминания
+        for pattern in once_patterns:
+            match = re.search(pattern, time_str)
+            if match:
+                return self._parse_once_reminder(match, pattern)
+        
+        # Проверяем периодические напоминания
+        for pattern in periodic_patterns:
+            match = re.search(pattern, time_str)
+            if match:
+                return self._parse_periodic_reminder(match, pattern)
+        
+        return None
+    
+    def _parse_once_reminder(self, match, pattern):
+        """Парсинг разового напоминания"""
+        if 'через' in pattern:
+            amount = int(match.group(1))
+            unit = match.group(2)
+            
+            now = datetime.now()
+            if 'минут' in unit:
+                reminder_time = now + timedelta(minutes=amount)
+            elif 'час' in unit:
+                reminder_time = now + timedelta(hours=amount)
+            elif 'день' in unit:
+                reminder_time = now + timedelta(days=amount)
+            
+            return {
+                'type': 'once',
+                'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
+                'frequency': 'once'
+            }
+        
+        elif 'завтра' in pattern:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            tomorrow = datetime.now() + timedelta(days=1)
+            reminder_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            return {
+                'type': 'once',
+                'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
+                'frequency': 'once'
+            }
+        
+        elif 'в' in pattern and len(match.groups()) == 2:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            today = datetime.now()
+            reminder_time = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            # Если время уже прошло сегодня, переносим на завтра
+            if reminder_time <= today:
+                reminder_time += timedelta(days=1)
+            
+            return {
+                'type': 'once',
+                'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
+                'frequency': 'once'
+            }
+        
+        return None
+    
+    def _parse_periodic_reminder(self, match, pattern):
+        """Парсинг периодического напоминания"""
+        if 'каждый день' in pattern:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'daily'
+            }
+        
+        elif 'раз в день' in pattern:
+            times_per_day = int(match.group(1))
+            
+            return {
+                'type': 'periodic',
+                'time': '09:00',  # По умолчанию в 9 утра
+                'frequency': f'{times_per_day}_times_daily'
+            }
+        
+        elif 'раз в неделю' in pattern:
+            times_per_week = int(match.group(1))
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': f'{times_per_week}_times_weekly'
+            }
+        
+        elif 'будням' in pattern:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'weekdays'
+            }
+        
+        elif 'выходным' in pattern:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'weekends'
+            }
+        
+        elif 'понедельник' in pattern or 'пн' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'monday'
+            }
+        
+        elif 'вторник' in pattern or 'вт' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'tuesday'
+            }
+        
+        elif 'среда' in pattern or 'ср' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'wednesday'
+            }
+        
+        elif 'четверг' in pattern or 'чт' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'thursday'
+            }
+        
+        elif 'пятница' in pattern or 'пт' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'friday'
+            }
+        
+        elif 'суббота' in pattern or 'сб' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'saturday'
+            }
+        
+        elif 'воскресенье' in pattern or 'вс' in pattern:
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            
+            return {
+                'type': 'periodic',
+                'time': f"{hour:02d}:{minute:02d}",
+                'frequency': 'sunday'
+            }
+        
+        return None
+
+# Создаем экземпляр бота
+bot = ReminderBot("YOUR_BOT_TOKEN_HERE")  # Замените на ваш токен
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    welcome_text = """
+🤖 Добро пожаловать в бота напоминаний!
+
+Я помогу вам не забывать важные дела. Вот что я умею:
+
+📝 **Создать напоминание:**
+Просто напишите мне сообщение в формате:
+"Напомни мне [текст] [время]"
+
+**Примеры времени:**
+• Разово: "в 15:30", "завтра в 10:00", "через 2 часа"
+• Ежедневно: "каждый день в 09:00"
+• Несколько раз в день: "3 раза в день"
+• По будням: "по будням в 18:00"
+• По выходным: "по выходным в 10:00"
+• По дням недели: "по понедельник в 14:00", "каждый пт в 16:30"
+
+**Команды:**
+/list - показать все напоминания
+/help - помощь
+/delete [номер] - удалить напоминание
+
+Начните с создания первого напоминания! 🚀
+    """
+    await update.message.reply_text(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    help_text = """
+📚 **Справка по использованию бота**
+
+**Создание напоминаний:**
+Напишите сообщение в формате: "Напомни мне [текст] [время]"
+
+**Примеры:**
+• "Напомни мне позвонить маме в 19:00"
+• "Напомни мне принять лекарство каждый день в 08:00"
+• "Напомни мне встречу завтра в 14:30"
+• "Напомни мне пить воду 5 раз в день"
+• "Напомни мне тренировку по понедельник в 18:00"
+• "Напомни мне звонок каждый пт в 16:00"
+
+**Команды:**
+/start - начать работу с ботом
+/list - показать все ваши напоминания
+/delete [номер] - удалить напоминание по номеру
+/help - показать эту справку
+
+**Типы напоминаний:**
+• Разовые - срабатывают один раз
+• Ежедневные - каждый день в указанное время
+• Периодические - несколько раз в день/неделю
+• По дням недели - только в будни или выходные
+• По конкретным дням - понедельник, вторник, среда, четверг, пятница, суббота, воскресенье
+    """
+    await update.message.reply_text(help_text)
+
+async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /list"""
+    user_id = update.effective_user.id
+    reminders = bot.get_user_reminders(user_id)
+    
+    if not reminders:
+        await update.message.reply_text("📭 У вас пока нет активных напоминаний.")
+        return
+    
+    text = "📋 **Ваши напоминания:**\n\n"
+    for i, reminder in enumerate(reminders, 1):
+        text += f"{i}. {reminder['message']}\n"
+        text += f"   ⏰ {reminder['reminder_time']}\n"
+        text += f"   🔄 {reminder['frequency']}\n"
+        text += f"   📅 Создано: {reminder['created_at']}\n\n"
+    
+    await update.message.reply_text(text)
+
+async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /delete"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("❌ Укажите номер напоминания для удаления.\nПример: /delete 1")
+        return
+    
+    try:
+        reminder_num = int(context.args[0])
+        reminders = bot.get_user_reminders(user_id)
+        
+        if reminder_num < 1 or reminder_num > len(reminders):
+            await update.message.reply_text("❌ Неверный номер напоминания.")
+            return
+        
+        reminder_id = reminders[reminder_num - 1]['id']
+        success = bot.delete_reminder(reminder_id, user_id)
+        
+        if success:
+            await update.message.reply_text(f"✅ Напоминание #{reminder_num} удалено.")
+        else:
+            await update.message.reply_text("❌ Ошибка при удалении напоминания.")
+            
+    except ValueError:
+        await update.message.reply_text("❌ Номер напоминания должен быть числом.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик обычных сообщений"""
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    
+    # Проверяем, является ли сообщение запросом на напоминание
+    if message_text.lower().startswith('напомни мне'):
+        # Извлекаем текст напоминания и время
+        reminder_text = message_text[12:].strip()  # Убираем "напомни мне"
+        
+        # Пытаемся найти время в тексте
+        time_info = bot.parse_time_input(reminder_text)
+        
+        if time_info:
+            # Извлекаем текст без времени
+            text_without_time = reminder_text
+            for pattern in [
+                r'\s+через\s+\d+\s+(минут|час|часа|часов|день|дня|дней)',
+                r'\s+в\s+\d{1,2}:\d{2}',
+                r'\s+завтра\s+в\s+\d{1,2}:\d{2}',
+                r'\s+каждый\s+день\s+в\s+\d{1,2}:\d{2}',
+                r'\s+\d+\s+раз\s+в\s+(день|неделю)',
+                r'\s+по\s+(будням|выходным)\s+в\s+\d{1,2}:\d{2}',
+                r'\s+по\s+(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс)\s+в\s+\d{1,2}:\d{2}',
+                r'\s+каждый\s+(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс)\s+в\s+\d{1,2}:\d{2}'
+            ]:
+                text_without_time = re.sub(pattern, '', text_without_time, flags=re.IGNORECASE)
+            
+            reminder_message = text_without_time.strip()
+            
+            if reminder_message:
+                # Добавляем напоминание в базу данных
+                reminder_id = bot.add_reminder(
+                    user_id, 
+                    reminder_message, 
+                    time_info['time'], 
+                    time_info['frequency']
+                )
+                
+                response = f"✅ Напоминание создано!\n\n"
+                response += f"📝 Текст: {reminder_message}\n"
+                response += f"⏰ Время: {time_info['time']}\n"
+                response += f"🔄 Периодичность: {time_info['frequency']}\n"
+                response += f"🆔 ID: {reminder_id}"
+                
+                await update.message.reply_text(response)
+            else:
+                await update.message.reply_text("❌ Не удалось определить текст напоминания.")
+        else:
+            await update.message.reply_text("❌ Не удалось распознать время напоминания.\n\nПримеры:\n• в 15:30\n• завтра в 10:00\n• каждый день в 09:00\n• через 2 часа")
+    else:
+        await update.message.reply_text("🤖 Для создания напоминания используйте формат:\n\"Напомни мне [текст] [время]\"\n\nИли используйте команду /help для получения справки.")
+
+class SchedulerManager:
+    """Менеджер планировщика напоминаний"""
+    
+    def __init__(self, bot_instance, application):
+        self.bot_instance = bot_instance
+        self.application = application
+        self.running = False
+        
+    def start_scheduler(self):
+        """Запуск планировщика"""
+        self.running = True
+        scheduler_thread = Thread(target=self._run_scheduler, daemon=True)
+        scheduler_thread.start()
+        logger.info("Планировщик запущен")
+    
+    def _run_scheduler(self):
+        """Основной цикл планировщика"""
+        while self.running:
+            try:
+                self._check_and_send_reminders()
+                time.sleep(30)  # Проверяем каждые 30 секунд
+            except Exception as e:
+                logger.error(f"Ошибка в планировщике: {e}")
+                time.sleep(60)
+    
+    def _check_and_send_reminders(self):
+        """Проверка и отправка напоминаний"""
+        conn = sqlite3.connect(self.bot_instance.db_path)
+        cursor = conn.cursor()
+        
+        # Получаем все активные напоминания
+        cursor.execute('''
+            SELECT id, user_id, message, reminder_time, frequency, last_sent
+            FROM reminders 
+            WHERE is_active = 1
+        ''')
+        
+        reminders = cursor.fetchall()
+        current_time = datetime.now()
+        
+        for reminder in reminders:
+            reminder_id, user_id, message, reminder_time, frequency, last_sent = reminder
+            
+            try:
+                should_send = self._should_send_reminder(reminder_time, frequency, last_sent, current_time, user_id)
+                logger.info(f"Проверка напоминания {reminder_id}: время={reminder_time}, частота={frequency}, последняя_отправка={last_sent}, отправить={should_send}")
+                
+                if should_send:
+                    # Отправляем напоминание
+                    logger.info(f"🚀 Отправляем напоминание {reminder_id} пользователю {user_id}")
+                    
+                    # Используем asyncio.run_coroutine_threadsafe для безопасного вызова из другого потока
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(self._send_reminder(user_id, message, reminder_id, frequency))
+                    finally:
+                        loop.close()
+                    
+                    # Для разовых напоминаний удаляем их после отправки
+                    if frequency == 'once':
+                        cursor.execute('''
+                            DELETE FROM reminders 
+                            WHERE id = ?
+                        ''', (reminder_id,))
+                        logger.info(f"🗑️ Разовое напоминание {reminder_id} удалено после отправки")
+                    else:
+                        # Для периодических напоминаний обновляем время последней отправки
+                        cursor.execute('''
+                            UPDATE reminders 
+                            SET last_sent = ? 
+                            WHERE id = ?
+                        ''', (current_time.strftime('%Y-%m-%d %H:%M:%S'), reminder_id))
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при обработке напоминания {reminder_id}: {e}")
+        
+        conn.commit()
+        conn.close()
+    
+    def _should_send_reminder(self, reminder_time: str, frequency: str, last_sent: str, current_time: datetime, user_id: int) -> bool:
+        """Определяет, нужно ли отправить напоминание"""
+        
+        if frequency == 'once':
+            # Разовое напоминание
+            try:
+                target_time = datetime.strptime(reminder_time, '%Y-%m-%d %H:%M')
+                # Отправляем если время пришло и еще не отправляли
+                if current_time >= target_time and not last_sent:
+                    logger.info(f"Разовое напоминание: текущее время {current_time} >= время напоминания {target_time}, не отправляли")
+                    return True
+                else:
+                    logger.info(f"Разовое напоминание: текущее время {current_time} < время напоминания {target_time} или уже отправляли")
+                    return False
+            except Exception as e:
+                logger.error(f"Ошибка парсинга времени разового напоминания: {e}")
+                return False
+        
+        elif frequency == 'daily':
+            # Ежедневное напоминание
+            try:
+                target_time = datetime.strptime(reminder_time, '%H:%M').time()
+                current_time_only = current_time.time()
+                
+                # Проверяем, что текущее время больше или равно времени напоминания
+                if current_time_only >= target_time:
+                    if not last_sent:
+                        return True
+                    
+                    last_sent_dt = datetime.strptime(last_sent, '%Y-%m-%d %H:%M:%S')
+                    # Отправляем, если последняя отправка была не сегодня
+                    return last_sent_dt.date() < current_time.date()
+                
+                return False
+            except:
+                return False
+        
+        elif frequency == 'weekdays':
+            # По будням (понедельник-пятница)
+            if current_time.weekday() < 5:  # 0-4 это понедельник-пятница
+                try:
+                    target_time = datetime.strptime(reminder_time, '%H:%M').time()
+                    current_time_only = current_time.time()
+                    
+                    if current_time_only >= target_time:
+                        if not last_sent:
+                            return True
+                        
+                        last_sent_dt = datetime.strptime(last_sent, '%Y-%m-%d %H:%M:%S')
+                        return last_sent_dt.date() < current_time.date()
+                    
+                    return False
+                except:
+                    return False
+            return False
+        
+        elif frequency == 'weekends':
+            # По выходным (суббота-воскресенье)
+            if current_time.weekday() >= 5:  # 5-6 это суббота-воскресенье
+                try:
+                    target_time = datetime.strptime(reminder_time, '%H:%M').time()
+                    current_time_only = current_time.time()
+                    
+                    if current_time_only >= target_time:
+                        if not last_sent:
+                            return True
+                        
+                        last_sent_dt = datetime.strptime(last_sent, '%Y-%m-%d %H:%M:%S')
+                        return last_sent_dt.date() < current_time.date()
+                    
+                    return False
+                except:
+                    return False
+            return False
+        
+        elif 'times_daily' in frequency:
+            # Несколько раз в день
+            times_per_day = int(frequency.split('_')[0])
+            try:
+                if not last_sent:
+                    return True
+                
+                last_sent_dt = datetime.strptime(last_sent, '%Y-%m-%d %H:%M:%S')
+                
+                # Если последняя отправка была не сегодня, отправляем
+                if last_sent_dt.date() < current_time.date():
+                    return True
+                
+                # Подсчитываем, сколько раз уже отправляли сегодня
+                conn = sqlite3.connect(self.bot_instance.db_path)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM reminders 
+                    WHERE user_id = ? 
+                    AND DATE(last_sent) = DATE(?)
+                    AND frequency = ?
+                ''', (user_id, current_time.strftime('%Y-%m-%d'), frequency))
+                
+                sent_today = cursor.fetchone()[0]
+                conn.close()
+                
+                # Отправляем, если еще не достигли лимита
+                return sent_today < times_per_day
+                
+            except:
+                return False
+        
+        elif frequency in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
+            # Напоминания по конкретным дням недели
+            day_mapping = {
+                'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+                'friday': 4, 'saturday': 5, 'sunday': 6
+            }
+            
+            target_day = day_mapping[frequency]
+            current_day = current_time.weekday()
+            
+            # Проверяем, что сегодня нужный день недели
+            if current_day == target_day:
+                try:
+                    target_time = datetime.strptime(reminder_time, '%H:%M').time()
+                    current_time_only = current_time.time()
+                    
+                    if current_time_only >= target_time:
+                        if not last_sent:
+                            return True
+                        
+                        last_sent_dt = datetime.strptime(last_sent, '%Y-%m-%d %H:%M:%S')
+                        # Отправляем, если последняя отправка была не сегодня
+                        return last_sent_dt.date() < current_time.date()
+                    
+                    return False
+                except:
+                    return False
+            
+            return False
+        
+        return False
+    
+    async def _send_reminder(self, user_id: int, message: str, reminder_id: int, frequency: str = None):
+        """Отправка напоминания пользователю"""
+        try:
+            if frequency == 'once':
+                reminder_text = f"🔔 Напоминание!\n\n{message}\n\n✅ Разовое напоминание выполнено и удалено."
+            else:
+                reminder_text = f"🔔 Напоминание!\n\n{message}"
+            
+            await self.application.bot.send_message(chat_id=user_id, text=reminder_text)
+            logger.info(f"✅ Напоминание отправлено пользователю {user_id}: {message}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при отправке напоминания пользователю {user_id}: {e}")
+
+def main():
+    """Основная функция запуска бота"""
+    # Получаем токен из переменных окружения (для облачного развертывания)
+    BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+    
+    if BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+        print("❌ ОШИБКА: Установите переменную окружения BOT_TOKEN!")
+        print("Для локального запуска замените YOUR_BOT_TOKEN_HERE на токен вашего бота")
+        print("Для облачного развертывания установите переменную BOT_TOKEN")
+        return
+    
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Добавляем обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list", list_reminders))
+    application.add_handler(CommandHandler("delete", delete_reminder))
+    
+    # Добавляем обработчик обычных сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Создаем и запускаем планировщик
+    scheduler = SchedulerManager(bot, application)
+    scheduler.start_scheduler()
+    
+    # Запускаем бота
+    print("🤖 Бот запущен! Нажмите Ctrl+C для остановки.")
+    print("📝 Токен получен из переменных окружения")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
