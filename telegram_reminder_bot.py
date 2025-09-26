@@ -29,19 +29,8 @@ class ReminderBot:
     
     def get_user_timezone(self, user_id: int) -> str:
         """Получить часовой пояс пользователя"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT timezone FROM user_settings 
-            WHERE user_id = ?
-        ''', (user_id,))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        # По умолчанию возвращаем московское время
-        return result[0] if result else 'Europe/Moscow'
+        # Захардкодим московское время для всех пользователей
+        return 'Europe/Moscow'
     
     def set_user_timezone(self, user_id: int, timezone: str):
         """Установить часовой пояс пользователя"""
@@ -66,9 +55,9 @@ class ReminderBot:
     
     def get_local_time(self, user_id: int) -> datetime:
         """Получить локальное время пользователя"""
-        user_tz = self.get_user_timezone(user_id)
-        tz = pytz.timezone(user_tz)
-        return datetime.now(tz)
+        # Захардкодим московское время
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        return datetime.now(moscow_tz)
         
     def init_database(self):
         """Инициализация базы данных"""
@@ -205,8 +194,9 @@ class ReminderBot:
             amount = int(match.group(1))
             unit = match.group(2)
             
-            # Используем UTC время для хранения в базе данных
-            now = datetime.utcnow()
+            # Используем московское время
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            now = datetime.now(moscow_tz)
             if 'минут' in unit:
                 reminder_time = now + timedelta(minutes=amount)
             elif 'час' in unit:
@@ -223,8 +213,9 @@ class ReminderBot:
         elif 'завтра' in pattern:
             hour = int(match.group(1))
             minute = int(match.group(2))
-            # Используем UTC время для хранения в базе данных
-            tomorrow = datetime.utcnow() + timedelta(days=1)
+            # Используем московское время
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            tomorrow = datetime.now(moscow_tz) + timedelta(days=1)
             reminder_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
             return {
@@ -236,8 +227,9 @@ class ReminderBot:
         elif 'в' in pattern and len(match.groups()) == 2:
             hour = int(match.group(1))
             minute = int(match.group(2))
-            # Используем UTC время для хранения в базе данных
-            today = datetime.utcnow()
+            # Используем московское время
+            moscow_tz = pytz.timezone('Europe/Moscow')
+            today = datetime.now(moscow_tz)
             reminder_time = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
             # Если время уже прошло сегодня, переносим на завтра
@@ -275,11 +267,14 @@ class ReminderBot:
             minute = int(match.group(4))
             
             try:
-                current_year = datetime.utcnow().year
+                # Используем московское время
+                moscow_tz = pytz.timezone('Europe/Moscow')
+                current_year = datetime.now(moscow_tz).year
                 reminder_time = datetime(current_year, month, day, hour, minute)
+                reminder_time = moscow_tz.localize(reminder_time)
                 
                 # Если дата уже прошла в этом году, переносим на следующий год
-                if reminder_time < datetime.utcnow():
+                if reminder_time < datetime.now(moscow_tz):
                     reminder_time = reminder_time.replace(year=current_year + 1)
                 
                 return {
@@ -574,8 +569,9 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     try:
-        # Создаем тестовое напоминание на 1 минуту вперед (в UTC)
-        test_time = datetime.utcnow() + timedelta(minutes=1)
+        # Создаем тестовое напоминание на 1 минуту вперед (в московском времени)
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        test_time = datetime.now(moscow_tz) + timedelta(minutes=1)
         reminder_id = bot.add_reminder(
             user_id, 
             "🧪 Тестовое напоминание", 
@@ -705,24 +701,26 @@ class SchedulerManager:
                     # Отправляем напоминание
                     logger.info(f"🚀 Отправляем напоминание {reminder_id} пользователю {user_id}")
                     
-                    # Используем asyncio.run_coroutine_threadsafe для безопасного вызова из другого потока
+                    # Используем простой подход - создаем новый event loop
                     import asyncio
                     try:
-                        # Получаем текущий event loop или создаем новый
-                        try:
-                            loop = asyncio.get_event_loop()
-                        except RuntimeError:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
+                        # Создаем новый event loop для этого потока
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
                         
-                        # Создаем задачу для отправки сообщения
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._send_reminder(user_id, message, reminder_id, frequency), 
-                            loop
-                        )
-                        future.result(timeout=10)  # Ждем максимум 10 секунд
+                        # Запускаем корутину
+                        loop.run_until_complete(self._send_reminder(user_id, message, reminder_id, frequency))
+                        
+                        # Закрываем loop
+                        loop.close()
                     except Exception as e:
                         logger.error(f"Ошибка при отправке напоминания {reminder_id}: {e}")
+                        # Пытаемся закрыть loop в случае ошибки
+                        try:
+                            if 'loop' in locals():
+                                loop.close()
+                        except:
+                            pass
                     
                     # Для разовых напоминаний удаляем их после отправки
                     if frequency == 'once':
@@ -751,22 +749,17 @@ class SchedulerManager:
         if frequency == 'once':
             # Разовое напоминание
             try:
+                # Время в базе хранится в московском времени
+                moscow_tz = pytz.timezone('Europe/Moscow')
                 target_time = datetime.strptime(reminder_time, '%Y-%m-%d %H:%M')
-                # Конвертируем target_time в UTC (предполагаем, что время в базе хранится в UTC)
-                target_time = pytz.UTC.localize(target_time)
-                
-                # Конвертируем current_time в UTC для сравнения
-                if current_time.tzinfo is not None:
-                    current_time_utc = current_time.astimezone(pytz.UTC)
-                else:
-                    current_time_utc = pytz.UTC.localize(current_time)
+                target_time = moscow_tz.localize(target_time)
                 
                 # Отправляем если время пришло и еще не отправляли
-                if current_time_utc >= target_time and not last_sent:
-                    logger.info(f"Разовое напоминание: текущее время {current_time_utc} >= время напоминания {target_time}, не отправляли")
+                if current_time >= target_time and not last_sent:
+                    logger.info(f"Разовое напоминание: текущее время {current_time} >= время напоминания {target_time}, не отправляли")
                     return True
                 else:
-                    logger.info(f"Разовое напоминание: текущее время {current_time_utc} < время напоминания {target_time} или уже отправляли")
+                    logger.info(f"Разовое напоминание: текущее время {current_time} < время напоминания {target_time} или уже отправляли")
                     return False
             except Exception as e:
                 logger.error(f"Ошибка парсинга времени разового напоминания: {e}")
