@@ -88,6 +88,14 @@ class ReminderBot:
             )
         ''')
         
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                timezone TEXT DEFAULT 'Europe/Moscow',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -158,7 +166,10 @@ class ReminderBot:
             r'через (\d+) (минут|час|часа|часов|день|дня|дней)',
             r'в (\d{1,2}):(\d{2})',
             r'завтра в (\d{1,2}):(\d{2})',
-            r'(\d{1,2})\.(\d{1,2})\.(\d{4}) в (\d{1,2}):(\d{2})'
+            r'(\d{1,2})\.(\d{1,2})\.(\d{4}) в (\d{1,2}):(\d{2})',
+            r'(\d{1,2})\.(\d{1,2}) в (\d{1,2}):(\d{2})',  # дата без года (текущий год)
+            r'(\d{1,2})/(\d{1,2})/(\d{4}) в (\d{1,2}):(\d{2})',  # формат дд/мм/гггг
+            r'(\d{1,2})/(\d{1,2}) в (\d{1,2}):(\d{2})'  # формат дд/мм (текущий год)
         ]
         
         # Паттерны для периодических напоминаний
@@ -235,6 +246,45 @@ class ReminderBot:
                 'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
                 'frequency': 'once'
             }
+        
+        elif len(match.groups()) == 5:  # формат дд.мм.гггг в чч:мм
+            day = int(match.group(1))
+            month = int(match.group(2))
+            year = int(match.group(3))
+            hour = int(match.group(4))
+            minute = int(match.group(5))
+            
+            try:
+                reminder_time = datetime(year, month, day, hour, minute)
+                return {
+                    'type': 'once',
+                    'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
+                    'frequency': 'once'
+                }
+            except ValueError:
+                return None
+        
+        elif len(match.groups()) == 4:  # формат дд.мм в чч:мм (текущий год)
+            day = int(match.group(1))
+            month = int(match.group(2))
+            hour = int(match.group(3))
+            minute = int(match.group(4))
+            
+            try:
+                current_year = datetime.now().year
+                reminder_time = datetime(current_year, month, day, hour, minute)
+                
+                # Если дата уже прошла в этом году, переносим на следующий год
+                if reminder_time < datetime.now():
+                    reminder_time = reminder_time.replace(year=current_year + 1)
+                
+                return {
+                    'type': 'once',
+                    'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
+                    'frequency': 'once'
+                }
+            except ValueError:
+                return None
         
         return None
     
@@ -378,6 +428,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Примеры времени:**
 • Разово: "в 15:30", "завтра в 10:00", "через 2 часа"
+• Конкретная дата: "9.10.2025 в 12:00", "15.03 в 14:30", "25/12/2024 в 18:00"
 • Ежедневно: "каждый день в 09:00"
 • Несколько раз в день: "3 раза в день"
 • По будням: "по будням в 18:00"
@@ -389,6 +440,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - помощь
 /delete [номер] - удалить напоминание
 /timezone - настроить часовой пояс
+/test - создать тестовое напоминание
 
 Начните с создания первого напоминания! 🚀
     """
@@ -406,6 +458,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • "Напомни мне позвонить маме в 19:00"
 • "Напомни мне принять лекарство каждый день в 08:00"
 • "Напомни мне встречу завтра в 14:30"
+• "Напомни мне съодить к врачу 9.10.2025 в 12:00"
+• "Напомни мне день рождения 15.03 в 10:00"
 • "Напомни мне пить воду 5 раз в день"
 • "Напомни мне тренировку по понедельник в 18:00"
 • "Напомни мне звонок каждый пт в 16:00"
@@ -415,6 +469,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /list - показать все ваши напоминания
 /delete [номер] - удалить напоминание по номеру
 /timezone - настроить часовой пояс
+/test - создать тестовое напоминание
 /help - показать эту справку
 
 **Типы напоминаний:**
@@ -510,6 +565,31 @@ async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except pytz.exceptions.UnknownTimeZoneError:
         await update.message.reply_text("❌ Неизвестный часовой пояс. Используйте команду `/timezone` для просмотра доступных вариантов.")
 
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /test для тестирования отправки сообщений"""
+    user_id = update.effective_user.id
+    
+    try:
+        # Создаем тестовое напоминание на 1 минуту вперед
+        test_time = datetime.now() + timedelta(minutes=1)
+        reminder_id = bot.add_reminder(
+            user_id, 
+            "🧪 Тестовое напоминание", 
+            test_time.strftime('%Y-%m-%d %H:%M'), 
+            'once'
+        )
+        
+        await update.message.reply_text(
+            f"✅ Тестовое напоминание создано!\n"
+            f"🆔 ID: {reminder_id}\n"
+            f"⏰ Время: {test_time.strftime('%H:%M:%S %d.%m.%Y')}\n"
+            f"📝 Сообщение: 🧪 Тестовое напоминание\n\n"
+            f"Ожидайте сообщение через 1 минуту..."
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при создании тестового напоминания: {e}")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик обычных сообщений"""
     user_id = update.effective_user.id
@@ -530,6 +610,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 r'\s+через\s+\d+\s+(минут|час|часа|часов|день|дня|дней)',
                 r'\s+в\s+\d{1,2}:\d{2}',
                 r'\s+завтра\s+в\s+\d{1,2}:\d{2}',
+                r'\s+\d{1,2}\.\d{1,2}\.\d{4}\s+в\s+\d{1,2}:\d{2}',
+                r'\s+\d{1,2}\.\d{1,2}\s+в\s+\d{1,2}:\d{2}',
+                r'\s+\d{1,2}/\d{1,2}/\d{4}\s+в\s+\d{1,2}:\d{2}',
+                r'\s+\d{1,2}/\d{1,2}\s+в\s+\d{1,2}:\d{2}',
                 r'\s+каждый\s+день\s+в\s+\d{1,2}:\d{2}',
                 r'\s+\d+\s+раз\s+в\s+(день|неделю)',
                 r'\s+по\s+(будням|выходным)\s+в\s+\d{1,2}:\d{2}'
@@ -557,7 +641,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ Не удалось определить текст напоминания.")
         else:
-            await update.message.reply_text("❌ Не удалось распознать время напоминания.\n\nПримеры:\n• в 15:30\n• завтра в 10:00\n• каждый день в 09:00\n• через 2 часа")
+            await update.message.reply_text("❌ Не удалось распознать время напоминания.\n\nПримеры:\n• в 15:30\n• завтра в 10:00\n• 9.10.2025 в 12:00\n• 15.03 в 14:30\n• каждый день в 09:00\n• через 2 часа")
     else:
         await update.message.reply_text("🤖 Для создания напоминания используйте формат:\n\"Напомни мне [текст] [время]\"\n\nИли используйте команду /help для получения справки.")
 
@@ -599,6 +683,7 @@ class SchedulerManager:
         ''')
         
         reminders = cursor.fetchall()
+        logger.info(f"🔍 Найдено {len(reminders)} активных напоминаний для проверки")
         
         for reminder in reminders:
             reminder_id, user_id, message, reminder_time, frequency, last_sent = reminder
@@ -618,12 +703,22 @@ class SchedulerManager:
                     
                     # Используем asyncio.run_coroutine_threadsafe для безопасного вызова из другого потока
                     import asyncio
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
                     try:
-                        loop.run_until_complete(self._send_reminder(user_id, message, reminder_id, frequency))
-                    finally:
-                        loop.close()
+                        # Получаем текущий event loop или создаем новый
+                        try:
+                            loop = asyncio.get_event_loop()
+                        except RuntimeError:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                        
+                        # Создаем задачу для отправки сообщения
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._send_reminder(user_id, message, reminder_id, frequency), 
+                            loop
+                        )
+                        future.result(timeout=10)  # Ждем максимум 10 секунд
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке напоминания {reminder_id}: {e}")
                     
                     # Для разовых напоминаний удаляем их после отправки
                     if frequency == 'once':
@@ -793,10 +888,36 @@ class SchedulerManager:
             else:
                 reminder_text = f"🔔 Напоминание!\n\n{message}"
             
+            # Проверяем, что бот доступен
+            if not self.application.bot:
+                logger.error(f"❌ Бот не инициализирован для отправки напоминания {reminder_id}")
+                return
+            
+            # Отправляем сообщение
             await self.application.bot.send_message(chat_id=user_id, text=reminder_text)
-            logger.info(f"✅ Напоминание отправлено пользователю {user_id}: {message}")
+            logger.info(f"✅ Напоминание {reminder_id} отправлено пользователю {user_id}: {message}")
+            
         except Exception as e:
-            logger.error(f"❌ Ошибка при отправке напоминания пользователю {user_id}: {e}")
+            error_msg = str(e).lower()
+            if "bot was blocked by the user" in error_msg or "chat not found" in error_msg:
+                logger.warning(f"⚠️ Пользователь {user_id} заблокировал бота или чат не найден. Деактивируем напоминание {reminder_id}")
+                # Деактивируем напоминание для заблокированного пользователя
+                try:
+                    conn = sqlite3.connect(self.bot_instance.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE reminders 
+                        SET is_active = 0 
+                        WHERE id = ?
+                    ''', (reminder_id,))
+                    conn.commit()
+                    conn.close()
+                except Exception as db_error:
+                    logger.error(f"Ошибка при деактивации напоминания {reminder_id}: {db_error}")
+            else:
+                logger.error(f"❌ Ошибка при отправке напоминания {reminder_id} пользователю {user_id}: {e}")
+                # Логируем дополнительную информацию для отладки
+                logger.error(f"Детали ошибки: тип={type(e).__name__}, сообщение={str(e)}")
 
 def main():
     """Основная функция запуска бота"""
@@ -818,6 +939,7 @@ def main():
     application.add_handler(CommandHandler("list", list_reminders))
     application.add_handler(CommandHandler("delete", delete_reminder))
     application.add_handler(CommandHandler("timezone", timezone_command))
+    application.add_handler(CommandHandler("test", test_command))
     
     # Добавляем обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
