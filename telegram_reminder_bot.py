@@ -355,77 +355,37 @@ class ReminderBot:
                 'frequency': 'weekends'
             }
         
-        elif 'понедельник' in pattern or 'пн' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
-            return {
-                'type': 'periodic',
-                'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'monday'
-            }
+        # Проверяем дни недели по захваченной группе, а не по паттерну
+        day_name = match.group(1).lower()
+        hour = int(match.group(2))
+        minute = int(match.group(3))
         
-        elif 'вторник' in pattern or 'вт' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
-            return {
-                'type': 'periodic',
-                'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'tuesday'
-            }
+        day_mapping = {
+            'понедельник': 'monday',
+            'пн': 'monday',
+            'вторник': 'tuesday', 
+            'вт': 'tuesday',
+            'среда': 'wednesday',
+            'ср': 'wednesday',
+            'четверг': 'thursday',
+            'чт': 'thursday',
+            'пятница': 'friday',
+            'пт': 'friday',
+            'суббота': 'saturday',
+            'сб': 'saturday',
+            'воскресенье': 'sunday',
+            'вс': 'sunday'
+        }
         
-        elif 'среда' in pattern or 'ср' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
-            return {
-                'type': 'periodic',
-                'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'wednesday'
-            }
-        
-        elif 'четверг' in pattern or 'чт' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
-            return {
-                'type': 'periodic',
-                'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'thursday'
-            }
-        
-        elif 'пятница' in pattern or 'пт' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
+        if day_name in day_mapping:
+            frequency = day_mapping[day_name]
             result = {
                 'type': 'periodic',
                 'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'friday'
+                'frequency': frequency
             }
-            logger.info(f"✅ Распознан день недели 'пятница': {result}")
+            logger.info(f"✅ Распознан день недели '{day_name}' -> '{frequency}': {result}")
             return result
-        
-        elif 'суббота' in pattern or 'сб' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
-            return {
-                'type': 'periodic',
-                'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'saturday'
-            }
-        
-        elif 'воскресенье' in pattern or 'вс' in pattern:
-            hour = int(match.group(2))
-            minute = int(match.group(3))
-            
-            return {
-                'type': 'periodic',
-                'time': f"{hour:02d}:{minute:02d}",
-                'frequency': 'sunday'
-            }
         
         return None
 
@@ -657,8 +617,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Проверяем, является ли сообщение запросом на напоминание
     if message_text.lower().startswith('напомни мне'):
-        # Извлекаем текст напоминания и время
-        reminder_text = message_text[12:].strip()  # Убираем "напомни мне"
+        reminder_text = message_text[12:].strip()  
         
         # Пытаемся найти время в тексте
         time_info = bot.parse_time_input(reminder_text)
