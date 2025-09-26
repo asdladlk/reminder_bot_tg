@@ -178,21 +178,21 @@ class ReminderBot:
             r'каждый (пн|вт|ср|чт|пт|сб|вс) в (\d{1,2}):(\d{2})'
         ]
         
-        # Проверяем разовые напоминания
-        for i, pattern in enumerate(once_patterns):
-            match = re.search(pattern, time_str)
-            if match:
-                logger.info(f"✅ Найден паттерн {i+1}: {pattern}, группы: {match.groups()}")
-                result = self._parse_once_reminder(match, pattern)
-                logger.info(f"📅 Результат парсинга: {result}")
-                return result
-        
-        # Проверяем периодические напоминания
+        # Проверяем периодические напоминания СНАЧАЛА (они более специфичные)
         for i, pattern in enumerate(periodic_patterns):
             match = re.search(pattern, time_str)
             if match:
                 logger.info(f"✅ Найден периодический паттерн {i+1}: {pattern}, группы: {match.groups()}")
                 result = self._parse_periodic_reminder(match, pattern)
+                logger.info(f"📅 Результат парсинга: {result}")
+                return result
+        
+        # Проверяем разовые напоминания
+        for i, pattern in enumerate(once_patterns):
+            match = re.search(pattern, time_str)
+            if match:
+                logger.info(f"✅ Найден разовый паттерн {i+1}: {pattern}, группы: {match.groups()}")
+                result = self._parse_once_reminder(match, pattern)
                 logger.info(f"📅 Результат парсинга: {result}")
                 return result
         
@@ -303,6 +303,8 @@ class ReminderBot:
     
     def _parse_periodic_reminder(self, match, pattern):
         """Парсинг периодического напоминания"""
+        logger.info(f"🔍 Парсинг периодического напоминания: pattern='{pattern}', groups={match.groups()}")
+        
         if 'каждый день' in pattern:
             hour = int(match.group(1))
             minute = int(match.group(2))
@@ -397,11 +399,13 @@ class ReminderBot:
             hour = int(match.group(2))
             minute = int(match.group(3))
             
-            return {
+            result = {
                 'type': 'periodic',
                 'time': f"{hour:02d}:{minute:02d}",
                 'frequency': 'friday'
             }
+            logger.info(f"✅ Распознан день недели 'пятница': {result}")
+            return result
         
         elif 'суббота' in pattern or 'сб' in pattern:
             hour = int(match.group(2))
