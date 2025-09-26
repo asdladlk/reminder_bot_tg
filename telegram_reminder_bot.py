@@ -610,6 +610,56 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при отладке: {e}")
 
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админская команда для просмотра всех напоминаний в боте"""
+    user_id = update.effective_user.id
+    
+    # Проверяем, что команда вызвана с правильным паролем
+    if not context.args or context.args[0] != "TheRules":
+        await update.message.reply_text("❌ Неверная команда.")
+        return
+    
+    try:
+        conn = sqlite3.connect(bot.db_path)
+        cursor = conn.cursor()
+        
+        # Получаем все напоминания всех пользователей
+        cursor.execute('''
+            SELECT id, user_id, message, reminder_time, frequency, is_active, created_at, last_sent
+            FROM reminders 
+            ORDER BY created_at DESC
+            LIMIT 50
+        ''')
+        
+        reminders = cursor.fetchall()
+        conn.close()
+        
+        if not reminders:
+            await update.message.reply_text("📭 В боте нет напоминаний.")
+            return
+        
+        text = "🔐 **Админская панель - Все напоминания:**\n\n"
+        for reminder in reminders:
+            reminder_id, user_id, message, reminder_time, frequency, is_active, created_at, last_sent = reminder
+            text += f"🆔 ID: {reminder_id}\n"
+            text += f"👤 Пользователь: {user_id}\n"
+            text += f"📝 Сообщение: {message}\n"
+            text += f"⏰ Время: {reminder_time}\n"
+            text += f"🔄 Частота: {frequency}\n"
+            text += f"✅ Активно: {bool(is_active)}\n"
+            text += f"📅 Создано: {created_at}\n"
+            text += f"📤 Последняя отправка: {last_sent or 'Никогда'}\n\n"
+            
+            # Ограничиваем длину сообщения
+            if len(text) > 3500:
+                text += "... (показаны первые 50 напоминаний)"
+                break
+        
+        await update.message.reply_text(text)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при получении данных: {e}")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик обычных сообщений"""
     user_id = update.effective_user.id
@@ -974,6 +1024,7 @@ def main():
     application.add_handler(CommandHandler("timezone", timezone_command))
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("debug", debug_command))
+    application.add_handler(CommandHandler("admin", admin_command))
     
     # Добавляем обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
