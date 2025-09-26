@@ -90,6 +90,8 @@ class ReminderBot:
     
     def add_reminder(self, user_id: int, message: str, reminder_time: str, frequency: str) -> int:
         """Добавить новое напоминание"""
+        logger.info(f"💾 Сохраняем напоминание: user_id={user_id}, message='{message}', time='{reminder_time}', frequency='{frequency}'")
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -102,6 +104,7 @@ class ReminderBot:
         conn.commit()
         conn.close()
         
+        logger.info(f"✅ Напоминание сохранено с ID: {reminder_id}")
         return reminder_id
     
     def get_user_reminders(self, user_id: int) -> List[Dict]:
@@ -451,6 +454,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /delete [номер] - удалить напоминание
 /timezone - настроить часовой пояс
 /test - создать тестовое напоминание
+/debug - отладка базы данных
 
 Начните с создания первого напоминания! 🚀
     """
@@ -480,6 +484,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /delete [номер] - удалить напоминание по номеру
 /timezone - настроить часовой пояс
 /test - создать тестовое напоминание
+/debug - отладка базы данных
 /help - показать эту справку
 
 **Типы напоминаний:**
@@ -601,6 +606,46 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при создании тестового напоминания: {e}")
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /debug для отладки базы данных"""
+    user_id = update.effective_user.id
+    
+    try:
+        conn = sqlite3.connect(bot.db_path)
+        cursor = conn.cursor()
+        
+        # Получаем все напоминания пользователя
+        cursor.execute('''
+            SELECT id, message, reminder_time, frequency, is_active, created_at, last_sent
+            FROM reminders 
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+        ''', (user_id,))
+        
+        reminders = cursor.fetchall()
+        conn.close()
+        
+        if not reminders:
+            await update.message.reply_text("📭 У вас нет напоминаний в базе данных.")
+            return
+        
+        text = "🔍 **Отладка базы данных:**\n\n"
+        for reminder in reminders:
+            reminder_id, message, reminder_time, frequency, is_active, created_at, last_sent = reminder
+            text += f"🆔 ID: {reminder_id}\n"
+            text += f"📝 Сообщение: {message}\n"
+            text += f"⏰ Время: {reminder_time}\n"
+            text += f"🔄 Частота: {frequency}\n"
+            text += f"✅ Активно: {bool(is_active)}\n"
+            text += f"📅 Создано: {created_at}\n"
+            text += f"📤 Последняя отправка: {last_sent or 'Никогда'}\n\n"
+        
+        await update.message.reply_text(text)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при отладке: {e}")
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик обычных сообщений"""
     user_id = update.effective_user.id
@@ -710,6 +755,8 @@ class SchedulerManager:
                 user_tz = self.bot_instance.get_user_timezone(user_id)
                 tz = pytz.timezone(user_tz)
                 current_time = datetime.now(tz)
+                
+                logger.info(f"🔍 Напоминание {reminder_id}: время_из_БД='{reminder_time}', частота='{frequency}', текущее_время={current_time}")
                 
                 should_send = self._should_send_reminder(reminder_time, frequency, last_sent, current_time, user_id)
                 logger.info(f"Проверка напоминания {reminder_id}: время={reminder_time}, частота={frequency}, последняя_отправка={last_sent}, отправить={should_send}")
@@ -963,6 +1010,7 @@ def main():
     application.add_handler(CommandHandler("delete", delete_reminder))
     application.add_handler(CommandHandler("timezone", timezone_command))
     application.add_handler(CommandHandler("test", test_command))
+    application.add_handler(CommandHandler("debug", debug_command))
     
     # Добавляем обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
