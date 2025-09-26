@@ -149,6 +149,7 @@ class ReminderBot:
     def parse_time_input(self, time_str: str) -> Optional[Dict]:
         """Парсинг времени и периодичности из пользовательского ввода"""
         time_str = time_str.strip().lower()
+        logger.info(f"🔍 Парсинг времени: '{time_str}'")
         
         # Паттерны для разового напоминания
         once_patterns = [
@@ -175,17 +176,24 @@ class ReminderBot:
         ]
         
         # Проверяем разовые напоминания
-        for pattern in once_patterns:
+        for i, pattern in enumerate(once_patterns):
             match = re.search(pattern, time_str)
             if match:
-                return self._parse_once_reminder(match, pattern)
+                logger.info(f"✅ Найден паттерн {i+1}: {pattern}, группы: {match.groups()}")
+                result = self._parse_once_reminder(match, pattern)
+                logger.info(f"📅 Результат парсинга: {result}")
+                return result
         
         # Проверяем периодические напоминания
-        for pattern in periodic_patterns:
+        for i, pattern in enumerate(periodic_patterns):
             match = re.search(pattern, time_str)
             if match:
-                return self._parse_periodic_reminder(match, pattern)
+                logger.info(f"✅ Найден периодический паттерн {i+1}: {pattern}, группы: {match.groups()}")
+                result = self._parse_periodic_reminder(match, pattern)
+                logger.info(f"📅 Результат парсинга: {result}")
+                return result
         
+        logger.info("❌ Не найдено подходящих паттернов")
         return None
     
     def _parse_once_reminder(self, match, pattern):
@@ -250,8 +258,11 @@ class ReminderBot:
             minute = int(match.group(5))
             
             try:
-                # Создаем naive datetime, будет конвертирован в UTC при сохранении
+                # Используем московское время
+                moscow_tz = pytz.timezone('Europe/Moscow')
                 reminder_time = datetime(year, month, day, hour, minute)
+                reminder_time = moscow_tz.localize(reminder_time)
+                
                 return {
                     'type': 'once',
                     'time': reminder_time.strftime('%Y-%m-%d %H:%M'),
@@ -606,6 +617,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if time_info:
             # Извлекаем текст без времени
             text_without_time = reminder_text
+            logger.info(f"🔍 Исходный текст: '{reminder_text}'")
+            
             for pattern in [
                 r'\s+через\s+\d+\s+(минут|час|часа|часов|день|дня|дней)',
                 r'\s+в\s+\d{1,2}:\d{2}',
@@ -618,9 +631,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 r'\s+\d+\s+раз\s+в\s+(день|неделю)',
                 r'\s+по\s+(будням|выходным)\s+в\s+\d{1,2}:\d{2}'
             ]:
+                old_text = text_without_time
                 text_without_time = re.sub(pattern, '', text_without_time, flags=re.IGNORECASE)
+                if old_text != text_without_time:
+                    logger.info(f"🔄 Удален паттерн '{pattern}': '{old_text}' -> '{text_without_time}'")
             
             reminder_message = text_without_time.strip()
+            logger.info(f"📝 Финальный текст напоминания: '{reminder_message}'")
             
             if reminder_message:
                 # Добавляем напоминание в базу данных
