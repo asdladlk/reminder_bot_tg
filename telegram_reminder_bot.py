@@ -205,7 +205,8 @@ class ReminderBot:
             amount = int(match.group(1))
             unit = match.group(2)
             
-            now = datetime.now()
+            # Используем UTC время для хранения в базе данных
+            now = datetime.utcnow()
             if 'минут' in unit:
                 reminder_time = now + timedelta(minutes=amount)
             elif 'час' in unit:
@@ -222,7 +223,8 @@ class ReminderBot:
         elif 'завтра' in pattern:
             hour = int(match.group(1))
             minute = int(match.group(2))
-            tomorrow = datetime.now() + timedelta(days=1)
+            # Используем UTC время для хранения в базе данных
+            tomorrow = datetime.utcnow() + timedelta(days=1)
             reminder_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
             return {
@@ -234,7 +236,8 @@ class ReminderBot:
         elif 'в' in pattern and len(match.groups()) == 2:
             hour = int(match.group(1))
             minute = int(match.group(2))
-            today = datetime.now()
+            # Используем UTC время для хранения в базе данных
+            today = datetime.utcnow()
             reminder_time = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
             # Если время уже прошло сегодня, переносим на завтра
@@ -255,6 +258,7 @@ class ReminderBot:
             minute = int(match.group(5))
             
             try:
+                # Создаем naive datetime, будет конвертирован в UTC при сохранении
                 reminder_time = datetime(year, month, day, hour, minute)
                 return {
                     'type': 'once',
@@ -271,11 +275,11 @@ class ReminderBot:
             minute = int(match.group(4))
             
             try:
-                current_year = datetime.now().year
+                current_year = datetime.utcnow().year
                 reminder_time = datetime(current_year, month, day, hour, minute)
                 
                 # Если дата уже прошла в этом году, переносим на следующий год
-                if reminder_time < datetime.now():
+                if reminder_time < datetime.utcnow():
                     reminder_time = reminder_time.replace(year=current_year + 1)
                 
                 return {
@@ -570,8 +574,8 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     try:
-        # Создаем тестовое напоминание на 1 минуту вперед
-        test_time = datetime.now() + timedelta(minutes=1)
+        # Создаем тестовое напоминание на 1 минуту вперед (в UTC)
+        test_time = datetime.utcnow() + timedelta(minutes=1)
         reminder_id = bot.add_reminder(
             user_id, 
             "🧪 Тестовое напоминание", 
@@ -748,12 +752,21 @@ class SchedulerManager:
             # Разовое напоминание
             try:
                 target_time = datetime.strptime(reminder_time, '%Y-%m-%d %H:%M')
+                # Конвертируем target_time в UTC (предполагаем, что время в базе хранится в UTC)
+                target_time = pytz.UTC.localize(target_time)
+                
+                # Конвертируем current_time в UTC для сравнения
+                if current_time.tzinfo is not None:
+                    current_time_utc = current_time.astimezone(pytz.UTC)
+                else:
+                    current_time_utc = pytz.UTC.localize(current_time)
+                
                 # Отправляем если время пришло и еще не отправляли
-                if current_time >= target_time and not last_sent:
-                    logger.info(f"Разовое напоминание: текущее время {current_time} >= время напоминания {target_time}, не отправляли")
+                if current_time_utc >= target_time and not last_sent:
+                    logger.info(f"Разовое напоминание: текущее время {current_time_utc} >= время напоминания {target_time}, не отправляли")
                     return True
                 else:
-                    logger.info(f"Разовое напоминание: текущее время {current_time} < время напоминания {target_time} или уже отправляли")
+                    logger.info(f"Разовое напоминание: текущее время {current_time_utc} < время напоминания {target_time} или уже отправляли")
                     return False
             except Exception as e:
                 logger.error(f"Ошибка парсинга времени разового напоминания: {e}")
